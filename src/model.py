@@ -65,23 +65,50 @@ class Model:
         )
         # 10개 공개 롤링 창 전체에서 하나의 값으로 선택한 혼합비다.
         # 창별 상수를 두지 않아 특정 평가 기간 맞춤 규칙을 금지한 대회 규정을 지킨다.
-        # 학습 모델 40%, 현재 농도 60%를 로그 공간에서 섞어 분포 변화 위험을 줄인다.
-        alpha = 0.4
+        # 학습 모델 50%, 현재 농도 50%를 로그 공간에서 섞어 분포 변화 위험을 줄인다.
+        alpha = 0.5
         blended_log = alpha * learned_log + (1.0 - alpha) * np.log1p(current)
+
+        # 배포본 conc_3wk_avg에는 미래값이 섞인 것으로 알려진 행이 하나 있다.
+        # 따라서 그 열을 출력 블렌딩에 직접 쓰지 않고, 평가기가 전달한 원점 이하
+        # conc_mean만으로 지역별 최근 3개 유효 관측의 산술평균을 다시 계산한다.
+        safe_three_week = []
+        for region in regions:
+            history = [
+                float(row["conc_mean"])
+                for row in rows
+                if row["region"] == region
+                and row["date_week"] <= origin_week
+                and row["conc_mean"] != ""
+            ][-3:]
+            safe_three_week.append(float(np.mean(history)) if history else np.nan)
+        safe_three_week = np.asarray(safe_three_week)
+
+        # 안전한 후행 평균 30%를 추가하면 급변 구간의 과도한 현재값 추종을 줄이면서
+        # 10개 창 평균과 최저 창 점수가 함께 개선됐다. 후행 평균이 없으면 기존
+        # 블렌딩 예측을 그대로 사용한다.
+        safe_log = np.where(np.isfinite(safe_three_week), np.log1p(safe_three_week), blended_log)
+        blended_log = 0.7 * blended_log + 0.3 * safe_log
         # log1p를 원 단위(copies/mL)로 되돌리고 물리적으로 불가능한 음수를 막는다.
         pred_conc = np.maximum(0.0, np.expm1(blended_log))
 
-        # 공식 라벨은 t+2 농도가 원점 기준선의 1.3배 이상인지로 정의되지만,
-        # 현재 농도에 적용할 지속 경보 임계값 1.1은 전체 창에서 공통으로 선택했다.
-        pred_alert = np.asarray(
-            [
-                int(
-                    current_rows[region]["conc_base_avg"] != ""
-                    and current[idx] >= 1.1 * float(current_rows[region]["conc_base_avg"])
-                )
-                for idx, region in enumerate(regions)
-            ]
-        )
+        # 경보는 최종 t+2 농도 예측 90%와 현재 농도 10%를 기준선 대비
+        # 로그 비율로 결합한다. 회귀 예측과 경보 판단이 같은 미래 신호를
+        # 공유하면서도 현재 관측의 지속성을 조금 남기는 구조다.
+        pred_alert = []
+        for idx, region in enumerate(regions):
+            base_text = current_rows[region]["conc_base_avg"]
+            if base_text == "":
+                pred_alert.append(0)
+                continue
+            base = max(float(base_text), 1e-9)
+            predicted_ratio = np.log((pred_conc[idx] + 1.0) / (base + 1.0))
+            current_ratio = np.log((current[idx] + 1.0) / (base + 1.0))
+            combined_ratio = 0.9 * predicted_ratio + 0.1 * current_ratio
+            # 임계값 1.1은 특정 창이 아니라 공개된 10개 롤링 창 전체에
+            # 하나의 값으로 적용해 Macro-F1과 최저 창 점수를 함께 비교했다.
+            pred_alert.append(int(combined_ratio >= np.log(1.1)))
+        pred_alert = np.asarray(pred_alert)
         # 공식 평가기가 요구하는 {지역: (예측 농도, 0/1 경보)} 형식으로 반환한다.
         return {
             region: (float(conc), int(alert))
