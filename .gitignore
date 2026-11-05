@@ -1,0 +1,15 @@
+# Competition data must never be committed.
+data/
+
+# Local environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated experiment artifacts
+artifacts/
+outputs/
+
+# Private planning and experiment notes (keep local; never publish)
+docs/internal/
