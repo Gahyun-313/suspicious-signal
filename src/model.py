@@ -48,6 +48,13 @@ class Model:
         )
         self.builder = None
 
+    def change_blend_weight(self, origin_week):
+        """수준 예측에 섞을 변화량 모델의 전역 비율을 반환한다."""
+
+        # 기본 제출 모델은 모든 평가 원점에 검증된 단일 비율을 적용한다.
+        # 실험 모델은 이 메서드만 재정의해 예측 코드를 복제하지 않고 비교한다.
+        return 0.1
+
     def fit(self, rows, national, aux=None):
         # rows와 national은 공식 평가기가 학습 기준 주까지만 잘라 전달한다.
         # 원본 CSV를 직접 읽지 않아 평가 창 이후 정보가 섞이지 않는다.
@@ -117,7 +124,10 @@ class Model:
         # 검증한 전역 비율 10%만 수준 모델에 섞는다.
         predicted_change = self.change_regressor.predict(x)
         change_conc = np.maximum(0.0, np.expm1(np.log1p(current) + predicted_change))
-        final_log = 0.9 * np.log1p(level_conc) + 0.1 * np.log1p(change_conc)
+        change_weight = self.change_blend_weight(origin_week)
+        final_log = (1.0 - change_weight) * np.log1p(level_conc) + change_weight * np.log1p(
+            change_conc
+        )
         pred_conc = np.maximum(0.0, np.expm1(final_log))
 
         # 경보는 최종 t+2 농도 예측 90%와 현재 농도 10%를 기준선 대비
