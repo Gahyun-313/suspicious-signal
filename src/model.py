@@ -130,9 +130,9 @@ class Model:
         )
         pred_conc = np.maximum(0.0, np.expm1(final_log))
 
-        # 경보는 최종 t+2 농도 예측 90%와 현재 농도 10%를 기준선 대비
+        # 경보는 최종 t+2 농도 예측 80%와 현재 농도 20%를 기준선 대비
         # 로그 비율로 결합한다. 회귀 예측과 경보 판단이 같은 미래 신호를
-        # 공유하면서도 현재 관측의 지속성을 조금 남기는 구조다.
+        # 공유하면서도 현재 관측의 지속성을 남겨 분류 경계를 안정화한다.
         pred_alert = []
         for idx, region in enumerate(regions):
             base_text = current_rows[region]["conc_base_avg"]
@@ -142,10 +142,10 @@ class Model:
             base = max(float(base_text), 1e-9)
             predicted_ratio = np.log((pred_conc[idx] + 1.0) / (base + 1.0))
             current_ratio = np.log((current[idx] + 1.0) / (base + 1.0))
-            combined_ratio = 0.9 * predicted_ratio + 0.1 * current_ratio
-            # 임계값 1.1은 특정 창이 아니라 공개된 10개 롤링 창 전체에
+            combined_ratio = 0.8 * predicted_ratio + 0.2 * current_ratio
+            # 임계값 1.09는 특정 창이 아니라 공개된 10개 롤링 창 전체에
             # 하나의 값으로 적용해 Macro-F1과 최저 창 점수를 함께 비교했다.
-            pred_alert.append(int(combined_ratio >= np.log(1.1)))
+            pred_alert.append(int(combined_ratio >= np.log(1.09)))
         pred_alert = np.asarray(pred_alert)
         # 공식 평가기가 요구하는 {지역: (예측 농도, 0/1 경보)} 형식으로 반환한다.
         return {
