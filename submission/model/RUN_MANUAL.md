@@ -6,6 +6,8 @@
 - `feature_builder.py`: 누수 방지 시계열 특성 생성
 - `asos_features.py`: 공식 `aux` ASOS 일자료 집계
 - `requirements.txt`: 재현 환경의 Python 패키지 버전
+- `predictions.csv`: 공식 전체 평가 키 2,159행에 대한 최종 예측
+- `score.json`: 공식 백테스트의 창별 결과와 자가 채점 점수
 
 원본 대회 데이터와 평가기는 모델자료 ZIP에 포함하지 않는다.
 
@@ -58,6 +60,17 @@ Pop-Location
 
 정상 실행 시 공식 10개 롤링 평가 창의 최종 정량점수 약 `0.2870`이 출력된다.
 실행 시간은 PC 환경에 따라 다르며 검증 환경에서는 약 4~6분이 소요됐다.
+
+동봉한 `predictions.csv`는 위 명령으로 생성한 전체 평가 창 예측이며, 다음
+명령으로 형식과 자가 채점 결과를 다시 확인할 수 있다.
+
+```powershell
+Push-Location $dataDir
+python .\evaluation.py score "$modelDir\predictions.csv"
+Pop-Location
+```
+
+동봉한 `score.json`의 최종 자가 채점 점수는 `0.28700005433573333`이다.
 
 ## 모델 인터페이스
 

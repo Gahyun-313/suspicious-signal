@@ -152,6 +152,16 @@ def zip_directory(source: Path, destination: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
+    parser.add_argument(
+        "--predictions",
+        type=Path,
+        default=ROOT / "outputs" / "submission-package-validation" / "predictions.csv",
+    )
+    parser.add_argument(
+        "--score-json",
+        type=Path,
+        default=ROOT / "outputs" / "submission-package-validation" / "score.json",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir.resolve()
@@ -164,6 +174,14 @@ def main() -> None:
     model_dir = staging / "model_submission"
     document_dir.mkdir(parents=True)
     model_dir.mkdir(parents=True)
+
+    # 제출 조건상 전체 2,159행 예측과 자가 채점 결과가 필수이므로 누락 시
+    # 불완전한 ZIP을 만들지 않고 즉시 중단한다.
+    predictions_path = args.predictions.resolve()
+    score_path = args.score_json.resolve()
+    for required in (predictions_path, score_path):
+        if not required.is_file():
+            raise FileNotFoundError(f"제출 필수 결과 파일이 없습니다: {required}")
 
     report_source = ROOT / "submission" / "document" / "solution_report.md"
     shutil.copy2(report_source, document_dir / "solution_report.md")
@@ -178,6 +196,8 @@ def main() -> None:
         (ROOT / "src" / "asos_features.py", "asos_features.py"),
         (ROOT / "requirements.txt", "requirements.txt"),
         (ROOT / "submission" / "model" / "RUN_MANUAL.md", "RUN_MANUAL.md"),
+        (predictions_path, "predictions.csv"),
+        (score_path, "score.json"),
     ):
         shutil.copy2(source, model_dir / name)
 
