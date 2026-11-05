@@ -10,6 +10,8 @@ __pycache__/
 # Generated experiment artifacts
 artifacts/
 outputs/
+dist/
+tmp/
 
 # Private planning and experiment notes (keep local; never publish)
 docs/internal/
