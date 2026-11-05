@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Windows 64비트 CPython 3.9 wheel로 검증한 실험 버전이다.
+catboost==1.2.10
