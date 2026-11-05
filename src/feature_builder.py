@@ -64,6 +64,16 @@ class FeatureBuilder:
         """요청한 원점 주까지의 지역 이력만 반환한다."""
         return [row for row in self.rows_by_region[region] if row["date_week"] <= date_week]
 
+    def reference_concentration(self, region, date_week):
+        """원점 농도 또는 그 이전의 가장 최근 유효 농도를 반환한다."""
+
+        # 원점 결측을 0으로 바꾸면 실제 급락으로 오해하므로, 공식 평가기가
+        # 전달한 원점 이하 이력에서 가장 가까운 유효 관측을 찾는다.
+        for row in reversed(self._regional_history(region, date_week)):
+            if row.get("conc_mean", "") != "":
+                return max(0.0, float(row["conc_mean"]))
+        return 0.0
+
     def make_one(self, region, date_week):
         """지역 한 곳·원점 한 주에 대응하는 수치 특성 벡터를 만든다."""
         history = self._regional_history(region, date_week)
@@ -167,6 +177,21 @@ class FeatureBuilder:
                 y_reg.append(_safe_log(float(row["target_conc_t2"])))
                 y_cls.append(int(row["target_alert_t2"]))
         return np.asarray(x, dtype=float), np.asarray(y_reg), np.asarray(y_cls)
+
+    def training_change_arrays(self):
+        """t에서 t+2까지의 로그 농도 변화량 학습 배열을 만든다."""
+
+        x, y_change = [], []
+        for region in self.region_order:
+            for row in self.rows_by_region[region]:
+                if row.get("target_conc_t2", "") == "":
+                    continue
+                current = self.reference_concentration(region, row["date_week"])
+                target = max(0.0, float(row["target_conc_t2"]))
+                x.append(self.make_one(region, row["date_week"]))
+                # 로그 차이는 절대 농도보다 상승·하락의 배율 변화에 집중한다.
+                y_change.append(_safe_log(target) - _safe_log(current))
+        return np.asarray(x, dtype=float), np.asarray(y_change)
 
     def prediction_array(self, origin_week):
         """공식 평가 원점에서 17개 지역의 예측용 배열을 만든다."""

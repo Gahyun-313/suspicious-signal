@@ -33,6 +33,19 @@ class Model:
                 random_state=2026,
             ),
         )
+        # 수준 모델이 놓치는 상승·하락 배율을 보완하도록 같은 특성으로
+        # log(t+2 농도) - log(현재 농도)를 예측하는 두 번째 모델을 둔다.
+        self.change_regressor = make_pipeline(
+            SimpleImputer(strategy="median", add_indicator=True),
+            HistGradientBoostingRegressor(
+                learning_rate=0.04,
+                max_iter=250,
+                max_leaf_nodes=15,
+                min_samples_leaf=20,
+                l2_regularization=2.0,
+                random_state=2026,
+            ),
+        )
         self.builder = None
 
     def fit(self, rows, national, aux=None):
@@ -45,6 +58,8 @@ class Model:
         # 현재 모델은 회귀 예측에서 경보를 유도하므로 y_cls는 사용하지 않는다.
         # 반환 계약을 유지해 이후 직접 분류 모델을 붙일 때 같은 특성을 쓸 수 있다.
         self.regressor.fit(x, y_reg)
+        change_x, y_change = self.builder.training_change_arrays()
+        self.change_regressor.fit(change_x, y_change)
 
     def predict(self, rows, origin_week, national, aux=None):
         # predict의 rows는 fit 때보다 뒤인 각 예측 원점까지 포함한다.
@@ -95,7 +110,15 @@ class Model:
         safe_log = np.where(np.isfinite(safe_three_week), np.log1p(safe_three_week), blended_log)
         blended_log = 0.7 * blended_log + 0.3 * safe_log
         # log1p를 원 단위(copies/mL)로 되돌리고 물리적으로 불가능한 음수를 막는다.
-        pred_conc = np.maximum(0.0, np.expm1(blended_log))
+        level_conc = np.maximum(0.0, np.expm1(blended_log))
+
+        # 변화량 모델은 현재 농도에 예측 로그 변화를 더해 t+2 농도로 복원한다.
+        # 단독 성능은 낮지만 급변 구간에서 보완 효과가 있어 전체 롤링 창에서
+        # 검증한 전역 비율 10%만 수준 모델에 섞는다.
+        predicted_change = self.change_regressor.predict(x)
+        change_conc = np.maximum(0.0, np.expm1(np.log1p(current) + predicted_change))
+        final_log = 0.9 * np.log1p(level_conc) + 0.1 * np.log1p(change_conc)
+        pred_conc = np.maximum(0.0, np.expm1(final_log))
 
         # 경보는 최종 t+2 농도 예측 90%와 현재 농도 10%를 기준선 대비
         # 로그 비율로 결합한다. 회귀 예측과 경보 판단이 같은 미래 신호를
