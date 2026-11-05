@@ -7,6 +7,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
 
+from asos_features import aggregate_asos
 from feature_builder import FeatureBuilder
 
 
@@ -34,19 +35,23 @@ class Model:
         )
         self.builder = None
 
-    def fit(self, rows, national):
+    def fit(self, rows, national, aux=None):
         # rows와 national은 공식 평가기가 학습 기준 주까지만 잘라 전달한다.
         # 원본 CSV를 직접 읽지 않아 평가 창 이후 정보가 섞이지 않는다.
-        self.builder = FeatureBuilder(rows, national)
+        # aux에는 평가기가 학습 기준 주까지 잘라 준 ASOS 일자료만 들어 있다.
+        weather_weekly = aggregate_asos(aux)
+        self.builder = FeatureBuilder(rows, national, weather_weekly)
         x, y_reg, y_cls = self.builder.training_arrays()
         # 현재 모델은 회귀 예측에서 경보를 유도하므로 y_cls는 사용하지 않는다.
         # 반환 계약을 유지해 이후 직접 분류 모델을 붙일 때 같은 특성을 쓸 수 있다.
         self.regressor.fit(x, y_reg)
 
-    def predict(self, rows, origin_week, national):
+    def predict(self, rows, origin_week, national, aux=None):
         # predict의 rows는 fit 때보다 뒤인 각 예측 원점까지 포함한다.
         # 따라서 학습 때 저장한 builder를 재사용하지 않고 원점 기준으로 다시 만든다.
-        builder = FeatureBuilder(rows, national)
+        # predict에서도 원점 주까지의 aux만 새로 집계해 미래 기상 누수를 막는다.
+        weather_weekly = aggregate_asos(aux)
+        builder = FeatureBuilder(rows, national, weather_weekly)
         x, regions = builder.prediction_array(origin_week)
         learned_log = self.regressor.predict(x)
 
