@@ -42,7 +42,7 @@ def _week_parts(date_week):
 class FeatureBuilder:
     """공식 평가기가 전달한 시점 이하 행만으로 특성을 만든다."""
 
-    def __init__(self, rows, national):
+    def __init__(self, rows, national, weather_weekly=None):
         # 지역별 과거 이력을 주차 순서로 정렬한다. 전달받은 rows 자체가
         # 기준 주 이후를 포함하지 않으므로 이 저장소에는 미래 관측이 없다.
         self.rows_by_region = defaultdict(list)
@@ -53,6 +53,9 @@ class FeatureBuilder:
 
         # 전국 자료도 평가기가 같은 기준 주로 잘라 전달한 값만 인덱싱한다.
         self.national = {row["date_week"]: row for row in national}
+        # ASOS는 공식 aux를 집계한 선택 특성이다. 전달되지 않으면 기존 모델과
+        # 같은 NaN 특성을 만들어 기상 미사용 환경에서도 인터페이스를 유지한다.
+        self.weather_weekly = weather_weekly or {}
         # 정렬된 지역 순서를 고정해 학습·예측 배열의 열 의미와 반환 순서를 맞춘다.
         self.region_order = sorted(self.rows_by_region)
         self.region_index = {name: idx for idx, name in enumerate(self.region_order)}
@@ -60,6 +63,16 @@ class FeatureBuilder:
     def _regional_history(self, region, date_week):
         """요청한 원점 주까지의 지역 이력만 반환한다."""
         return [row for row in self.rows_by_region[region] if row["date_week"] <= date_week]
+
+    def reference_concentration(self, region, date_week):
+        """원점 농도 또는 그 이전의 가장 최근 유효 농도를 반환한다."""
+
+        # 원점 결측을 0으로 바꾸면 실제 급락으로 오해하므로, 공식 평가기가
+        # 전달한 원점 이하 이력에서 가장 가까운 유효 관측을 찾는다.
+        for row in reversed(self._regional_history(region, date_week)):
+            if row.get("conc_mean", "") != "":
+                return max(0.0, float(row["conc_mean"]))
+        return 0.0
 
     def make_one(self, region, date_week):
         """지역 한 곳·원점 한 주에 대응하는 수치 특성 벡터를 만든다."""
@@ -129,6 +142,25 @@ class FeatureBuilder:
                     _safe_log(_number(national.get("covid_cases_national", ""))),
                 ]
             )
+
+        # 원점과 최근 4주 ASOS 관측 기상을 추가한다. 주차 키는 현재 지역
+        # 이력에서 가져오므로 예측 원점 이후 기상은 조회할 수 없다.
+        for lag in range(0, 5):
+            week_key = weeks[-1 - lag] if len(weeks) > lag else None
+            weather = self.weather_weekly.get((region, week_key), {}) if week_key else {}
+            precipitation = _number(weather.get("asos_precip"))
+            temperature = _number(weather.get("asos_temp"))
+            features.extend(
+                [
+                    _safe_log(precipitation),
+                    temperature,
+                    _number(weather.get("asos_n_precip"), 0.0),
+                    _number(weather.get("asos_n_temp"), 0.0),
+                    _number(weather.get("asos_blank_rain_days"), 0.0),
+                    float(not np.isfinite(precipitation)),
+                    float(not np.isfinite(temperature)),
+                ]
+            )
         return features
 
     def training_arrays(self):
@@ -145,6 +177,21 @@ class FeatureBuilder:
                 y_reg.append(_safe_log(float(row["target_conc_t2"])))
                 y_cls.append(int(row["target_alert_t2"]))
         return np.asarray(x, dtype=float), np.asarray(y_reg), np.asarray(y_cls)
+
+    def training_change_arrays(self):
+        """t에서 t+2까지의 로그 농도 변화량 학습 배열을 만든다."""
+
+        x, y_change = [], []
+        for region in self.region_order:
+            for row in self.rows_by_region[region]:
+                if row.get("target_conc_t2", "") == "":
+                    continue
+                current = self.reference_concentration(region, row["date_week"])
+                target = max(0.0, float(row["target_conc_t2"]))
+                x.append(self.make_one(region, row["date_week"]))
+                # 로그 차이는 절대 농도보다 상승·하락의 배율 변화에 집중한다.
+                y_change.append(_safe_log(target) - _safe_log(current))
+        return np.asarray(x, dtype=float), np.asarray(y_change)
 
     def prediction_array(self, origin_week):
         """공식 평가 원점에서 17개 지역의 예측용 배열을 만든다."""

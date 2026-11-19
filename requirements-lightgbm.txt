@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Python 3.9를 지원하는 마지막 검증 버전. 4.7.0부터 Python 3.10 이상이 필요하다.
+lightgbm==4.6.0

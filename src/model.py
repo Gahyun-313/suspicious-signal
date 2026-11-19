@@ -7,6 +7,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
 
+from asos_features import aggregate_asos
 from feature_builder import FeatureBuilder
 
 
@@ -32,21 +33,47 @@ class Model:
                 random_state=2026,
             ),
         )
+        # 수준 모델이 놓치는 상승·하락 배율을 보완하도록 같은 특성으로
+        # log(t+2 농도) - log(현재 농도)를 예측하는 두 번째 모델을 둔다.
+        self.change_regressor = make_pipeline(
+            SimpleImputer(strategy="median", add_indicator=True),
+            HistGradientBoostingRegressor(
+                learning_rate=0.04,
+                max_iter=250,
+                max_leaf_nodes=15,
+                min_samples_leaf=20,
+                l2_regularization=2.0,
+                random_state=2026,
+            ),
+        )
         self.builder = None
 
-    def fit(self, rows, national):
+    def change_blend_weight(self, origin_week):
+        """수준 예측에 섞을 변화량 모델의 전역 비율을 반환한다."""
+
+        # 기본 제출 모델은 모든 평가 원점에 검증된 단일 비율을 적용한다.
+        # 실험 모델은 이 메서드만 재정의해 예측 코드를 복제하지 않고 비교한다.
+        return 0.1
+
+    def fit(self, rows, national, aux=None):
         # rows와 national은 공식 평가기가 학습 기준 주까지만 잘라 전달한다.
         # 원본 CSV를 직접 읽지 않아 평가 창 이후 정보가 섞이지 않는다.
-        self.builder = FeatureBuilder(rows, national)
+        # aux에는 평가기가 학습 기준 주까지 잘라 준 ASOS 일자료만 들어 있다.
+        weather_weekly = aggregate_asos(aux)
+        self.builder = FeatureBuilder(rows, national, weather_weekly)
         x, y_reg, y_cls = self.builder.training_arrays()
         # 현재 모델은 회귀 예측에서 경보를 유도하므로 y_cls는 사용하지 않는다.
         # 반환 계약을 유지해 이후 직접 분류 모델을 붙일 때 같은 특성을 쓸 수 있다.
         self.regressor.fit(x, y_reg)
+        change_x, y_change = self.builder.training_change_arrays()
+        self.change_regressor.fit(change_x, y_change)
 
-    def predict(self, rows, origin_week, national):
+    def predict(self, rows, origin_week, national, aux=None):
         # predict의 rows는 fit 때보다 뒤인 각 예측 원점까지 포함한다.
         # 따라서 학습 때 저장한 builder를 재사용하지 않고 원점 기준으로 다시 만든다.
-        builder = FeatureBuilder(rows, national)
+        # predict에서도 원점 주까지의 aux만 새로 집계해 미래 기상 누수를 막는다.
+        weather_weekly = aggregate_asos(aux)
+        builder = FeatureBuilder(rows, national, weather_weekly)
         x, regions = builder.prediction_array(origin_week)
         learned_log = self.regressor.predict(x)
 
@@ -65,23 +92,61 @@ class Model:
         )
         # 10개 공개 롤링 창 전체에서 하나의 값으로 선택한 혼합비다.
         # 창별 상수를 두지 않아 특정 평가 기간 맞춤 규칙을 금지한 대회 규정을 지킨다.
-        # 학습 모델 40%, 현재 농도 60%를 로그 공간에서 섞어 분포 변화 위험을 줄인다.
-        alpha = 0.4
+        # 학습 모델 50%, 현재 농도 50%를 로그 공간에서 섞어 분포 변화 위험을 줄인다.
+        alpha = 0.5
         blended_log = alpha * learned_log + (1.0 - alpha) * np.log1p(current)
-        # log1p를 원 단위(copies/mL)로 되돌리고 물리적으로 불가능한 음수를 막는다.
-        pred_conc = np.maximum(0.0, np.expm1(blended_log))
 
-        # 공식 라벨은 t+2 농도가 원점 기준선의 1.3배 이상인지로 정의되지만,
-        # 현재 농도에 적용할 지속 경보 임계값 1.1은 전체 창에서 공통으로 선택했다.
-        pred_alert = np.asarray(
-            [
-                int(
-                    current_rows[region]["conc_base_avg"] != ""
-                    and current[idx] >= 1.1 * float(current_rows[region]["conc_base_avg"])
-                )
-                for idx, region in enumerate(regions)
-            ]
+        # 배포본 conc_3wk_avg에는 미래값이 섞인 것으로 알려진 행이 하나 있다.
+        # 따라서 그 열을 출력 블렌딩에 직접 쓰지 않고, 평가기가 전달한 원점 이하
+        # conc_mean만으로 지역별 최근 3개 유효 관측의 산술평균을 다시 계산한다.
+        safe_three_week = []
+        for region in regions:
+            history = [
+                float(row["conc_mean"])
+                for row in rows
+                if row["region"] == region
+                and row["date_week"] <= origin_week
+                and row["conc_mean"] != ""
+            ][-3:]
+            safe_three_week.append(float(np.mean(history)) if history else np.nan)
+        safe_three_week = np.asarray(safe_three_week)
+
+        # 안전한 후행 평균 30%를 추가하면 급변 구간의 과도한 현재값 추종을 줄이면서
+        # 10개 창 평균과 최저 창 점수가 함께 개선됐다. 후행 평균이 없으면 기존
+        # 블렌딩 예측을 그대로 사용한다.
+        safe_log = np.where(np.isfinite(safe_three_week), np.log1p(safe_three_week), blended_log)
+        blended_log = 0.7 * blended_log + 0.3 * safe_log
+        # log1p를 원 단위(copies/mL)로 되돌리고 물리적으로 불가능한 음수를 막는다.
+        level_conc = np.maximum(0.0, np.expm1(blended_log))
+
+        # 변화량 모델은 현재 농도에 예측 로그 변화를 더해 t+2 농도로 복원한다.
+        # 단독 성능은 낮지만 급변 구간에서 보완 효과가 있어 전체 롤링 창에서
+        # 검증한 전역 비율 10%만 수준 모델에 섞는다.
+        predicted_change = self.change_regressor.predict(x)
+        change_conc = np.maximum(0.0, np.expm1(np.log1p(current) + predicted_change))
+        change_weight = self.change_blend_weight(origin_week)
+        final_log = (1.0 - change_weight) * np.log1p(level_conc) + change_weight * np.log1p(
+            change_conc
         )
+        pred_conc = np.maximum(0.0, np.expm1(final_log))
+
+        # 경보는 최종 t+2 농도 예측 80%와 현재 농도 20%를 기준선 대비
+        # 로그 비율로 결합한다. 회귀 예측과 경보 판단이 같은 미래 신호를
+        # 공유하면서도 현재 관측의 지속성을 남겨 분류 경계를 안정화한다.
+        pred_alert = []
+        for idx, region in enumerate(regions):
+            base_text = current_rows[region]["conc_base_avg"]
+            if base_text == "":
+                pred_alert.append(0)
+                continue
+            base = max(float(base_text), 1e-9)
+            predicted_ratio = np.log((pred_conc[idx] + 1.0) / (base + 1.0))
+            current_ratio = np.log((current[idx] + 1.0) / (base + 1.0))
+            combined_ratio = 0.8 * predicted_ratio + 0.2 * current_ratio
+            # 임계값 1.09는 특정 창이 아니라 공개된 10개 롤링 창 전체에
+            # 하나의 값으로 적용해 Macro-F1과 최저 창 점수를 함께 비교했다.
+            pred_alert.append(int(combined_ratio >= np.log(1.09)))
+        pred_alert = np.asarray(pred_alert)
         # 공식 평가기가 요구하는 {지역: (예측 농도, 0/1 경보)} 형식으로 반환한다.
         return {
             region: (float(conc), int(alert))
