@@ -3,6 +3,7 @@ data/
 
 # Local environments and caches
 .venv/
+.idea/
 __pycache__/
 *.py[cod]
 .pytest_cache/
